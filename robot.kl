@@ -1,0 +1,105 @@
+PROGRAM Robot
+%NOPAUSE = ERROR + TPENABLE + COMMAND
+%NOABORT = ERROR
+
+VAR
+    -- queue vars
+    queuePtr :QUEUE_TYPE
+    queueBuffer :ARRAY[100] OF INTEGER
+    queueValue :INTEGER
+    queueSeqNo :INTEGER
+    queueStatus :INTEGER
+
+    -- motion vars
+    targetPositions :ARRAY[100] OF XYZWPR
+    targetPosition :XYZWPR
+
+    -- local vars
+    terminate :BOOLEAN
+
+    -- task vars
+    taskStatus :INTEGER
+
+    -- socket vars for communication (added for waiting on socket)
+    socketStatus :INTEGER
+    socketHandle :INTEGER
+
+-- Function to clear USER screen
+ROUTINE clear_screen
+BEGIN
+    WRITE(CHR(128),CHR(137)) -- Clear TP display area
+    WRITE TPPROMPT(CHR(128)) -- Clear TP prompt area
+    WRITE TPFUNC(CHR(128)) -- Clear TP function area
+END clear_screen
+
+-- Function to add position to queue and return status
+ROUTINE add_to_queue(inputPosition :XYZWPR)
+BEGIN
+    targetPositions[queueValue] = inputPosition
+    APPEND_QUEUE(queueValue, queuePtr, queueBuffer, queueSeqNo, queueStatus)
+
+    -- Now add status to notify the socket that the queue is updated
+    socketStatus = CHECK_QUEUE_STATUS(queuePtr)
+    IF socketStatus = 0 THEN  -- If queue is full or locked
+        -- Send stop signal via socket to wait for release
+        SEND_SOCKET(socketHandle, "QUEUE_LOCKED")
+        WAIT_SOCKET(socketHandle)
+    ELSE
+        -- Send confirmation that the item was successfully added
+        SEND_SOCKET(socketHandle, "ITEM_ADDED")
+    ENDIF
+
+    queueValue = queueValue + 1
+END add_to_queue
+
+-- Function to initialize variables
+ROUTINE init_vars
+BEGIN
+    $TERMTYPE = NODECEL
+    $SEGTERMTYPE = FINE
+    $MOTYPE=LINEAR
+    $ORIENT_TYPE = RSWORLD
+    $SPEED=50
+    $UFRAME = $MNUFRAME[1,1]
+    $UTOOL = $MNUTOOL[1,2]
+
+    FORCE_SPMENU (TP_PANEL, SPI_TPUSER, 1)
+    targetPosition = CURPOS(0,0)
+    terminate = FALSE
+    queueValue = 1
+    queueSeqNo = 0
+    queueStatus = 0
+    INIT_QUEUE(queuePtr)
+
+    -- Initialize socket for communication
+    socketHandle = OPEN_SOCKET("127.0.0.1", 5000)  -- Assuming the robot communicates via a local socket
+END init_vars
+
+-- Function to change pose
+ROUTINE change_pose
+BEGIN
+    SET_POS_REG(1, targetPositions[queueValue], queueStatus)
+    CALL_PROG('MOVE_TO_PR', 7)
+END change_pose
+
+BEGIN
+    clear_screen
+    init_vars
+    RUN_TASK('RobotServer', 1, FALSE, FALSE, 1, taskStatus)
+
+    WHILE NOT terminate DO
+        IF (queuePtr.n_entries > 0) THEN
+            GET_QUEUE(queuePtr, queueBuffer, queueValue, queueSeqNo, queueStatus)
+            DELETE_QUEUE(queueSeqNo, queuePtr, queueBuffer, queueStatus)
+
+            -- Change the pose after processing the queue item
+            change_pose
+        ENDIF
+
+        -- Delay to give some time before checking the queue again
+        DELAY(1)
+    ENDWHILE
+
+    -- Clean up socket after operation
+    CLOSE_SOCKET(socketHandle)
+END Robot

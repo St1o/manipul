@@ -1,0 +1,168 @@
+PROGRAM RobotServer
+%NOPAUSE = ERROR + TPENABLE + COMMAND
+%NOABORT = ERROR
+%STACKSIZE = 1024
+%NOLOCKGROUP
+
+VAR
+    targetPosition :XYZWPR
+    terminate FROM Robot :BOOLEAN
+    varEntry :INTEGER
+    socket :FILE
+    socketStatus :INTEGER
+    socketBuffer :STRING[254]
+    bytesAhead :INTEGER
+    timeoutVal :INTEGER
+    codeStatus :INTEGER
+    separatorPos :INTEGER
+    tempString :STRING[254]
+    valueString :STRING[23]
+    pose_str :STRING[254]
+    pose_arr :ARRAY[6] OF STRING[254]
+    iterator :INTEGER
+    str_start :INTEGER
+    str_end :INTEGER
+
+CONST
+    PORT = 6669  -- Порт для соединения
+    TIMEOUT = 100  -- Тайм-аут в миллисекундах
+
+-- Hook functions from main class
+ROUTINE clear_screen FROM Robot
+ROUTINE add_to_queue(targetPosition :XYZWPR) FROM Robot
+
+-- Function to initialize target position
+ROUTINE init_position
+BEGIN
+    targetPosition.config_data.CFG_TURN_NO1 = 0
+    targetPosition.config_data.CFG_TURN_NO2 = 0
+    targetPosition.config_data.CFG_TURN_NO3 = 0
+    targetPosition.config_data.CFG_FLIP = FALSE
+    targetPosition.config_data.CFG_UP = TRUE
+    targetPosition.config_data.CFG_FRONT = TRUE
+END init_position
+
+-- Function to initialize variables
+ROUTINE init_vars
+BEGIN
+    socketStatus = 0
+    codeStatus = 0
+    bytesAhead = 0
+    terminate = FALSE
+    tempString = ''
+    valueString = ''
+END init_vars
+
+-- Function to initialize socket connection
+ROUTINE init_socket
+BEGIN
+    CLOSE FILE socket
+    SET_FILE_ATR(socket, ATR_IA)  -- Установка атрибутов сокета
+    SET_VAR(varEntry, '*SYSTEM*', '$HOSTS_CFG[8].$SERVER_PORT', PORT, socketStatus)
+END init_socket
+
+-- Function to open socket
+ROUTINE open_socket
+BEGIN
+    MSG_DISCO('S8:', socketStatus)  -- Дисконнект для очистки предыдущих подключений
+    MSG_CONNECT('S8:', socketStatus)  -- Подключение через сокет
+    OPEN FILE socket('RW', 'S8:')  -- Открытие сокета в режиме чтения/записи
+END open_socket
+
+-- Function to close socket
+ROUTINE close_socket
+BEGIN
+    MSG_DISCO('S8:', socketStatus)  -- Дисконнект от сокета
+    CLOSE FILE socket  -- Закрытие сокета
+    WRITE('SERVER CLOSED', CR)  -- Сообщение о закрытии сервера
+END close_socket
+
+-- Function to initialize buffer and read socket data
+ROUTINE init_buffer :INTEGER
+BEGIN
+    BYTES_AHEAD(socket, bytesAhead, socketStatus)  -- Получение количества доступных байт для чтения
+    IF NOT UNINIT(bytesAhead) THEN
+        WRITE('remaining byte:', bytesAhead ,' STATUS ', socketStatus, CR)
+        IF (bytesAhead >= 1) THEN  -- Если есть данные для чтения
+            IF bytesAhead > 128 THEN
+                READ socket(socketBuffer::128)  -- Чтение данных из сокета
+            ELSE
+                READ socket(socketBuffer::bytesAhead)
+            ENDIF
+            socketStatus = IO_STATUS(socket)  -- Статус операции чтения
+            WRITE(socketBuffer, CR)  -- Вывод полученных данных
+
+            -- Обработка команд
+            IF socketBuffer = 'go_home' THEN
+                CALL_PROG('GO_HOME', 7)
+                RETURN(0)
+            ENDIF
+            IF socketBuffer = 'pick_up' THEN
+                CALL_PROG('PICK_UP', 7)
+                RETURN(0)
+            ENDIF
+            IF socketBuffer = 'put_down' THEN
+                CALL_PROG('PUT_DOWN', 7)
+                RETURN(0)
+            ENDIF
+            IF socketBuffer = 'terminate' THEN
+                terminate = TRUE  -- Остановка сервера
+                RETURN(-1)
+            ENDIF
+        ELSE
+            RETURN(0)
+        ENDIF
+    ELSE
+        RETURN(0)
+    ENDIF
+    RETURN(1)
+END init_buffer
+
+-- Function to parse pose data from the buffer
+ROUTINE parse_pose
+BEGIN
+    pose_str = socketBuffer
+    str_start = 1
+    str_end = 1
+    FOR iterator = 1 TO 6 DO
+        -- Извлечение координат из строки
+        WHILE SUB_STR(pose_str, str_end, 1) <> ',' DO
+            str_end = str_end + 1
+        ENDWHILE
+        pose_arr[iterator] = SUB_STR(pose_str, str_start, str_end - str_start)
+        str_start = str_end + 1
+        str_end = str_start
+    ENDFOR
+    WRITE('Pose Received: ', CR)
+    FOR iterator = 1 TO 6 DO
+        WRITE(pose_arr[iterator], CR)
+    ENDFOR
+
+    -- Преобразование строк в реальные значения
+    CNV_STR_REAL(pose_arr[1], targetPosition.X)
+    CNV_STR_REAL(pose_arr[2], targetPosition.Y)
+    CNV_STR_REAL(pose_arr[3], targetPosition.Z)
+    CNV_STR_REAL(pose_arr[4], targetPosition.W)
+    CNV_STR_REAL(pose_arr[5], targetPosition.P)
+    CNV_STR_REAL(pose_arr[6], targetPosition.R)
+END parse_pose
+
+-- Main program execution loop
+BEGIN
+    clear_screen
+    codeStatus = 0
+    WHILE (codeStatus <> -1) OR (NOT terminate) DO
+        init_vars
+        init_socket
+        open_socket
+        codeStatus = init_buffer
+        WRITE('codeStatus: ', codeStatus)
+        IF codeStatus = 1 THEN
+            parse_pose  -- Парсим позу
+            add_to_queue(targetPosition)  -- Добавляем позицию в очередь
+        ENDIF
+        close_socket  -- Закрываем сокет
+        DELAY(200)  -- Задержка между циклами
+    ENDWHILE
+    close_socket  -- Закрытие сокета после завершения
+END RobotServer
